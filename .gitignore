@@ -1,0 +1,7 @@
+lerobot/
+.venv/
+outputs/
+sim_bar/outputs/
+sim_bar/demos/
+sim_bar/__pycache__/
+Desktop/
