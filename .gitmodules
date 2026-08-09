@@ -1,0 +1,4 @@
+[submodule "lerobot"]
+	path = lerobot
+	url = https://github.com/Teo03/lerobot-so101-dagger.git
+	branch = main
