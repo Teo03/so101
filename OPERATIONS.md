@@ -114,7 +114,7 @@ The non-ACT proof separates scene understanding from the reusable robot skills:
 
 ```text
 C270 image -> YOLOE masks -> planar camera geometry -> Cartesian goals
-           -> Isaac Lab IK -> guarded real-arm executor
+           -> standalone SO-101 IK -> guarded real-arm executor
 ```
 
 `perceive_scene.py` uses text-prompted YOLOE segmentation. It selected the real
@@ -181,8 +181,8 @@ do not treat the current successful pickup as arbitrary 6-DoF generalization.
 
 `run_vision_pick_place.py` connects the validated components without weakening
 their safety boundaries. By default it captures/detects the scene, writes and
-checks the task program, generates a return-home Cartesian plan in Isaac Lab,
-and replays that plan in physics. It does not open the follower serial port:
+checks the task program, and generates a return-home Cartesian plan with the
+standalone SO-101 kinematics layer. It does not open the follower serial port:
 
 ```bash
 PYTHONPATH=/home/teo/so101/.vision_packages \
@@ -200,9 +200,17 @@ PYTHONPATH=/home/teo/so101/.vision_packages \
   --execute --confirm MOVE
 ```
 
-Real execution is allowed only with the physically proven wrist orientation and
-after simulation validation succeeds. The complete plan releases in the basket
+Real execution is allowed only with the physically proven wrist orientation.
+The complete plan releases in the basket
 and follows the explicit open-gripper `postdrop_*` return path. After torque is
 disabled, the pipeline captures a new front image and verifies that the detected
 bar center lies inside the detected basket mask. Annotated before/after evidence
 is written to `~/Desktop/so101_vision_pick_place/`.
+
+The default execution rates are `0.50x` in free space, `0.25x` at contact, and
+`0.40x` while carrying the object. Override them up to the plan's full bounded
+speed with `--speed-scale`, `--contact-speed-scale`, and
+`--loaded-speed-scale`. The first Ctrl-C performs a monitored `0.30x` retrace
+to the starting pose; a second Ctrl-C immediately freezes the goal and releases
+torque. Set the return rate with `--interrupt-return-speed-scale` (maximum
+`0.50x`).

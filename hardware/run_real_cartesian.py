@@ -25,8 +25,8 @@ LEROBOT_SRC = ROOT / "lerobot/src"
 if str(LEROBOT_SRC) not in sys.path:
     sys.path.insert(0, str(LEROBOT_SRC))
 
-from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.feetech import FeetechMotorsBus
+from lerobot.motors import Motor, MotorCalibration, MotorNormMode  # noqa: E402
+from lerobot.motors.feetech import FeetechMotorsBus  # noqa: E402
 
 
 JOINT_NAMES = (
@@ -96,8 +96,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speed-scale",
         type=float,
-        default=0.25,
-        help="Fraction of planned speed.  0.25 is approximately 4–5 degrees/s.",
+        default=0.5,
+        help="Fraction of planned speed (0.05-1.0). 1.0 uses the plan's full speed caps.",
     )
     parser.add_argument(
         "--contact-speed-scale",
@@ -108,6 +108,12 @@ def parse_args() -> argparse.Namespace:
         "--loaded-speed-scale",
         type=float,
         help="Optional speed while lifting or lowering a grasped object.",
+    )
+    parser.add_argument(
+        "--interrupt-return-speed-scale",
+        type=float,
+        default=0.3,
+        help="Speed used for the monitored return after the first Ctrl-C (0.05-0.5).",
     )
     parser.add_argument(
         "--confirm",
@@ -380,10 +386,20 @@ def main() -> None:
     bus = make_bus(args.port, calibration)
     moving = False
     stop_reason = ""
+    emergency_stop = False
 
     def request_stop(signum: int, _frame) -> None:
-        nonlocal stop_reason
+        nonlocal stop_reason, emergency_stop
+        if stop_reason:
+            emergency_stop = True
+            print("\n[real] second interrupt: emergency stop requested", flush=True)
+            return
         stop_reason = f"signal {signum}"
+        print(
+            "\n[real] interrupt received: returning slowly to the starting pose; "
+            "press Ctrl-C again for immediate torque release",
+            flush=True,
+        )
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
@@ -418,8 +434,8 @@ def main() -> None:
             raise ValueError(
                 f"Unknown --execute-through phase {args.execute_through!r}; choose one of {unique_phases}"
             )
-        if not 0.05 <= args.speed_scale <= 0.5:
-            raise ValueError("--speed-scale must be between 0.05 and 0.5")
+        if not 0.05 <= args.speed_scale <= 1.0:
+            raise ValueError("--speed-scale must be between 0.05 and 1.0")
         contact_speed_scale = (
             args.speed_scale
             if args.contact_speed_scale is None
@@ -430,10 +446,12 @@ def main() -> None:
             if args.loaded_speed_scale is None
             else args.loaded_speed_scale
         )
-        if not 0.05 <= contact_speed_scale <= 0.5:
-            raise ValueError("--contact-speed-scale must be between 0.05 and 0.5")
-        if not 0.05 <= loaded_speed_scale <= 0.5:
-            raise ValueError("--loaded-speed-scale must be between 0.05 and 0.5")
+        if not 0.05 <= contact_speed_scale <= 1.0:
+            raise ValueError("--contact-speed-scale must be between 0.05 and 1.0")
+        if not 0.05 <= loaded_speed_scale <= 1.0:
+            raise ValueError("--loaded-speed-scale must be between 0.05 and 1.0")
+        if not 0.05 <= args.interrupt_return_speed_scale <= 0.5:
+            raise ValueError("--interrupt-return-speed-scale must be between 0.05 and 0.5")
         if not 0.0 <= args.boundary_hold_seconds <= 30.0:
             raise ValueError("--boundary-hold-seconds must be between 0 and 30")
         if args.recover_to_start:
@@ -524,13 +542,13 @@ def main() -> None:
         )
         trip_count = 0
         previous_phase = ""
-        sent_history: list[np.ndarray] = []
+        sent_history: list[np.ndarray] = [initial["position"].copy()]
         print(
             f"[real] EXECUTING {requested_label}: "
             f"free={args.speed_scale:.2f}x contact={contact_speed_scale:.2f}x "
             f"loaded={loaded_speed_scale:.2f}x. "
             "A forward soft trip automatically retraces; "
-            "Ctrl-C freezes and disables torque.",
+            "First Ctrl-C returns to start; second Ctrl-C releases torque immediately.",
             flush=True,
         )
         for index, (target, phase) in enumerate(
@@ -545,7 +563,16 @@ def main() -> None:
             )
             period = (1.0 / control_hz) / phase_speed_scale
             if stop_reason:
-                hold_and_release(bus, stop_reason)
+                return_period = (1.0 / control_hz) / args.interrupt_return_speed_scale
+                recovered, recovery_reason = monitored_retrace(
+                    bus,
+                    sent_history,
+                    return_period,
+                    lambda: emergency_stop,
+                )
+                if not recovered and emergency_stop:
+                    recovery_reason = "second Ctrl-C during automatic return"
+                hold_and_release(bus, recovery_reason)
                 moving = False
                 return
             target_dict = {

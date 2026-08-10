@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -56,15 +57,28 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Physical execution is rejected unless this is exactly MOVE.",
     )
-    parser.add_argument("--speed-scale", type=float, default=0.25)
-    parser.add_argument("--contact-speed-scale", type=float, default=0.15)
-    parser.add_argument("--loaded-speed-scale", type=float, default=0.20)
+    parser.add_argument("--speed-scale", type=float, default=0.50)
+    parser.add_argument("--contact-speed-scale", type=float, default=0.25)
+    parser.add_argument("--loaded-speed-scale", type=float, default=0.40)
+    parser.add_argument("--interrupt-return-speed-scale", type=float, default=0.30)
     return parser.parse_args()
 
 
-def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
+def run(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    child_handles_sigint: bool = False,
+) -> None:
     print("[pipeline] " + " ".join(command), flush=True)
-    subprocess.run(command, cwd=ROOT, env=env, check=True)
+    previous_sigint = None
+    if child_handles_sigint:
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        subprocess.run(command, cwd=ROOT, env=env, check=True)
+    finally:
+        if previous_sigint is not None:
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 def capture_and_perceive(
@@ -204,9 +218,12 @@ def main() -> None:
             str(args.contact_speed_scale),
             "--loaded-speed-scale",
             str(args.loaded_speed_scale),
+            "--interrupt-return-speed-scale",
+            str(args.interrupt_return_speed_scale),
             "--confirm",
             "MOVE",
-        ]
+        ],
+        child_handles_sigint=True,
     )
 
     capture_and_perceive(
