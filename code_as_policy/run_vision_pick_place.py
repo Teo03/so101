@@ -222,6 +222,8 @@ def main() -> None:
             str(args.speed),
             "--loaded-speed-scale",
             str(args.speed),
+            "--interrupt-return-speed-scale",
+            str(args.speed),
             "--confirm",
             "MOVE",
         ],

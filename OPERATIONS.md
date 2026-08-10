@@ -208,7 +208,7 @@ bar center lies inside the detected basket mask. Annotated before/after evidence
 is written to `~/Desktop/so101_vision_pick_place/`.
 
 The end-to-end task uses one `--speed` value for every motion phase. It accepts
-`0.05` through `1.0`, where `1.0` uses the plan's full bounded speed. The first
-Ctrl-C performs a monitored `0.30x` retrace to the starting pose; a second
-Ctrl-C immediately freezes the goal and releases torque. The lower-level real
-executor retains separate advanced speed controls when needed for diagnostics.
+`0.05` through `1.0`, where `1.0` uses the plan's full bounded speed. The same
+value controls the first Ctrl-C's monitored retrace to the starting pose. A
+second Ctrl-C immediately freezes the goal and releases torque. The lower-level
+real executor retains separate advanced speed controls when needed for diagnostics.

@@ -112,8 +112,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interrupt-return-speed-scale",
         type=float,
-        default=0.3,
-        help="Speed used for the monitored return after the first Ctrl-C (0.05-0.5).",
+        default=0.5,
+        help="Speed used for the monitored return after the first Ctrl-C (0.05-1.0).",
     )
     parser.add_argument(
         "--confirm",
@@ -450,8 +450,8 @@ def main() -> None:
             raise ValueError("--contact-speed-scale must be between 0.05 and 1.0")
         if not 0.05 <= loaded_speed_scale <= 1.0:
             raise ValueError("--loaded-speed-scale must be between 0.05 and 1.0")
-        if not 0.05 <= args.interrupt_return_speed_scale <= 0.5:
-            raise ValueError("--interrupt-return-speed-scale must be between 0.05 and 0.5")
+        if not 0.05 <= args.interrupt_return_speed_scale <= 1.0:
+            raise ValueError("--interrupt-return-speed-scale must be between 0.05 and 1.0")
         if not 0.0 <= args.boundary_hold_seconds <= 30.0:
             raise ValueError("--boundary-hold-seconds must be between 0 and 30")
         if args.recover_to_start:
