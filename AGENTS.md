@@ -41,9 +41,10 @@ This repository captures the SO-101 sim-to-real bar pick-and-place calibration w
 The ACT correction workflow was physically validated on 2026-08-09. The customized
 LeRobot source is preserved in the private repository
 `https://github.com/Teo03/lerobot-so101-dagger` and linked here as the `lerobot/`
-submodule. The validated private commit is `c21eac60` (`feat(rollout): add robust
-DAgger corrections`). The corresponding development commit with the upstream LeRobot
-history is retained locally as `6baf10b0` on `agent/robust-dagger-corrections`.
+submodule. The current validated private commit is `ec624ee8` (`fix(rollout): make
+DAgger shutdown terminate cleanly`), built on the original DAgger implementation commit
+`c21eac60`. The corresponding development commit with the upstream LeRobot history is
+retained locally as `6baf10b0` on `agent/robust-dagger-corrections`.
 
 The correction flow uses one key:
 
@@ -59,8 +60,9 @@ The correction flow uses one key:
 4. Repeat the three-state cycle for each correction. `Tab` is not needed.
 5. Press `Esc` at any point to stop. With `--return_to_initial_position=true`, teardown
    stops inference, returns the follower to the pose captured at startup, disconnects
-   both cameras and both arms, finalizes the dataset, and performs a bounded Rerun
-   shutdown. `Ctrl-C` follows the same teardown path.
+   both cameras and both arms, finalizes the dataset, unregisters Rerun's blocking
+   `atexit` retry, and performs one bounded Rerun shutdown. `Ctrl-C` follows the same
+   teardown path.
 
 Why the mapping now works:
 
@@ -75,6 +77,30 @@ Why the mapping now works:
   distorted motion.
 - Keep `--policy.n_action_steps=100`; this is the physically validated setting for this
   checkpoint.
+
+Correction-only collection semantics and training goal:
+
+- Autonomous ACT motion is not written to the dataset when
+  `--strategy.record_autonomous=false`. A 40-second autonomous attempt followed by a
+  5-second human correction creates one approximately 150-frame correction episode; it
+  does not extend or rewrite the autonomous attempt.
+- Begin correcting as soon as ACT visibly drifts, then continue until the robot reaches
+  a stable state from which ACT can safely resume. With ACT `chunk_size=100` at 30 FPS,
+  target 5-10 second correction windows so they contain at least one coherent action
+  chunk rather than a very short, heavily padded fragment.
+- The DAgger objective is to add expert actions specifically for states the learned
+  policy visits and mishandles. Keep the original full demonstrations so task coverage
+  is preserved; corrections teach recovery and reduce compounding error.
+- Structurally validated correction data currently exists in the two `v5` runs and the
+  `v6` run: 5 episodes, 1,109 frames, approximately 37 seconds. Keep `v2` excluded
+  because it was collected with the bad mapping. Visually review every retained clip
+  before aggregation.
+- Collect roughly 20-30 varied, successful correction clips before the first ACT
+  fine-tune. Build a new aggregate from the original 35 demonstrations plus reviewed
+  corrections, ensure corrections contribute about 20-30% of training samples, then
+  fine-tune from the current checkpoint and compare fixed real-world trial sets. Repeat
+  collection/fine-tuning rounds until intervention frequency falls without regressing
+  previously successful parts of the task.
 
 Validated command:
 
@@ -121,15 +147,18 @@ Operational notes:
 - Keep the leader's long handle and the workspace clear during automatic alignment and
   automatic return-to-start.
 - Initial inference, the intentional smooth handover, and AV1 episode encoding can emit
-  temporary slow-loop warnings. Compressed Rerun images and bounded Rerun shutdown avoid
-  the previous visualization backpressure hang.
+  temporary slow-loop warnings. Compressed Rerun images plus unregistering Rerun's
+  `atexit` retry before bounded shutdown avoid the previous visualization backpressure
+  hang.
 - If a run is force-killed or motor torque state is uncertain, power-cycle the affected
   arm before touching it or starting another run.
 - Corrections collected before exact mapping was fixed (notably early `v1`/`v2` runs)
   should not be mixed into training. Use a fresh dataset repo ID for each new collection.
-- Software validation for the private commit: `34 passed` in `tests/test_rollout.py`,
-  changed-file Ruff checks passed, `git diff --check` passed, and Python compilation
-  passed. The complete state cycle was then validated on the physical leader/follower.
+- Software validation for the private commit: `39 passed` across `tests/test_rollout.py`
+  and `tests/utils/test_rerun_visualization.py`; changed-file Ruff checks,
+  `git diff --check`, and Python compilation passed. The complete state cycle was then
+  validated on the physical leader/follower. The final shutdown fix still requires one
+  short hardware smoke test confirming both `Esc` and `Ctrl-C` return to the shell.
 
 ## Notes
 
