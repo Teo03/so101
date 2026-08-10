@@ -207,10 +207,8 @@ disabled, the pipeline captures a new front image and verifies that the detected
 bar center lies inside the detected basket mask. Annotated before/after evidence
 is written to `~/Desktop/so101_vision_pick_place/`.
 
-The default execution rates are `0.50x` in free space, `0.25x` at contact, and
-`0.40x` while carrying the object. Override them up to the plan's full bounded
-speed with `--speed-scale`, `--contact-speed-scale`, and
-`--loaded-speed-scale`. The first Ctrl-C performs a monitored `0.30x` retrace
-to the starting pose; a second Ctrl-C immediately freezes the goal and releases
-torque. Set the return rate with `--interrupt-return-speed-scale` (maximum
-`0.50x`).
+The end-to-end task uses one `--speed` value for every motion phase. It accepts
+`0.05` through `1.0`, where `1.0` uses the plan's full bounded speed. The first
+Ctrl-C performs a monitored `0.30x` retrace to the starting pose; a second
+Ctrl-C immediately freezes the goal and releases torque. The lower-level real
+executor retains separate advanced speed controls when needed for diagnostics.

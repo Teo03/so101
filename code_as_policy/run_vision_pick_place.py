@@ -57,10 +57,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Physical execution is rejected unless this is exactly MOVE.",
     )
-    parser.add_argument("--speed-scale", type=float, default=0.50)
-    parser.add_argument("--contact-speed-scale", type=float, default=0.25)
-    parser.add_argument("--loaded-speed-scale", type=float, default=0.40)
-    parser.add_argument("--interrupt-return-speed-scale", type=float, default=0.30)
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=0.50,
+        help="One speed for every task phase, from 0.05 to 1.0.",
+    )
     return parser.parse_args()
 
 
@@ -158,6 +160,8 @@ def verify_postcondition(observation_path: Path) -> bool:
 
 def main() -> None:
     args = parse_args()
+    if not 0.05 <= args.speed <= 1.0:
+        raise ValueError("--speed must be between 0.05 and 1.0")
     if args.execute and args.confirm != "MOVE":
         raise RuntimeError("Physical execution requires the literal flag: --confirm MOVE")
     if args.execute and args.orientation_mode != "proven":
@@ -213,13 +217,11 @@ def main() -> None:
             "--execute-through",
             "postdrop_reset",
             "--speed-scale",
-            str(args.speed_scale),
+            str(args.speed),
             "--contact-speed-scale",
-            str(args.contact_speed_scale),
+            str(args.speed),
             "--loaded-speed-scale",
-            str(args.loaded_speed_scale),
-            "--interrupt-return-speed-scale",
-            str(args.interrupt_return_speed_scale),
+            str(args.speed),
             "--confirm",
             "MOVE",
         ],
