@@ -66,8 +66,6 @@ def main() -> None:
         bar_yaw_delta = float(
             (bar_yaw - reference_yaw + np.pi / 2.0) % np.pi - np.pi / 2.0
         )
-    commanded_yaw_delta = bar_yaw_delta if args.orientation_mode == "vision" else 0.0
-
     if not (-0.28 <= bar_xy[0] <= 0.02 and -0.14 <= bar_xy[1] <= 0.06):
         raise RuntimeError(f"Detected bar is outside the currently validated pickup region: {bar_xy}")
     if not (-0.02 <= basket_xy[0] <= 0.24 and 0.08 <= basket_xy[1] <= 0.30):
@@ -127,22 +125,20 @@ def main() -> None:
             {"skill": "verify", "condition": "bar_inside_basket"},
         ],
         "ik_command": [
-            "/home/teo/IsaacLab/isaaclab.sh",
-            "-p",
-            str(ROOT / "isaac/plan_real_cartesian.py"),
-            "--headless",
-            "--device",
-            "cuda:0",
-            "--bar-x",
+            sys.executable,
+            str(ROOT / "hardware/plan_pick_place.py"),
+            "--pick-x",
             f"{bar_xy[0]:.6f}",
-            "--bar-y",
+            "--pick-y",
             f"{bar_xy[1]:.6f}",
-            "--bar-yaw-delta-deg",
-            f"{np.degrees(commanded_yaw_delta):.6f}",
+            "--pick-z",
+            "0.028535",
             "--drop-x",
             f"{drop_xy[0]:.6f}",
             "--drop-y",
             f"{drop_xy[1]:.6f}",
+            "--drop-z",
+            "0.105000",
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

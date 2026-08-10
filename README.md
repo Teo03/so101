@@ -14,7 +14,7 @@ learned ACT skill   Cartesian skill
    |                      |
    +----------+-----------+
               |
- guarded real executor / Isaac Sim
+       guarded real executor
 ```
 
 Use the unified command index instead of remembering individual script names:
@@ -34,6 +34,8 @@ implementation.
 - `code_as_policy/`: task programs and orchestration.
 - `perception/`: scene detection and workspace calibration.
 - `hardware/`: guarded real-arm and leader interfaces.
+- `kinematics/`: standalone SO-101 FK/IK and workspace-frame registration.
+- `skills/`: reusable task-to-trajectory building blocks.
 - `act/`: learned ACT policy service.
 - `isaac/`: simulation scene, teleoperation, IK, and validation.
 - `rl/`: isolated PPO teacher experiment.
@@ -45,6 +47,6 @@ implementation.
 
 ## Safe default
 
-Most commands only inspect, plan, or simulate. Real motion still requires the
+Planning is offline and does not open the serial port. Real motion still requires the
 underlying executor's explicit `--confirm MOVE` gate; the unified CLI does not
 bypass it.

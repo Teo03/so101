@@ -31,6 +31,7 @@ COMMANDS = (
     Command("cap", "observe", "perception/perceive_scene.py", "Detect the bar and basket."),
     Command("cap", "plan", "code_as_policy/plan_from_scene.py", "Write an inspectable task/skill program."),
     Command("cap", "run", "code_as_policy/run_vision_pick_place.py", "Run the bounded vision task pipeline."),
+    Command("real", "plan", "hardware/plan_pick_place.py", "Compile standalone Cartesian IK."),
     Command("real", "execute", "hardware/run_real_cartesian.py", "Inspect or execute a guarded motor plan."),
     Command("real", "sync", "hardware/sync_leader_to_follower.py", "Align leader and follower explicitly."),
     Command("real", "watchdog", "hardware/real_torque_watchdog.py", "Run the follower torque watchdog."),
@@ -57,7 +58,7 @@ def print_commands() -> None:
     print("\nExamples:")
     print("  python -m tools.cli cap observe --device 0")
     print("  python -m tools.cli cap plan")
-    print("  python -m tools.cli cap run --skip-sim-validation")
+    print("  python -m tools.cli cap run")
     print("  python -m tools.cli real execute --plan PLAN.npz")
     print("  python -m tools.cli sim act --preview_only --steps 1 --device cuda")
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare, validate, and optionally execute the vision bar-to-basket task.
+"""Prepare and optionally execute the vision bar-to-basket task.
 
-The default mode is hardware-safe: it may capture a camera frame and run Isaac
-Lab, but it never opens the follower serial port.  Physical motion additionally
+The default mode is hardware-safe and never opens the follower serial port.
+Physical motion additionally
 requires both ``--execute`` and the literal ``--confirm MOVE``; the guarded
 executor performs the final hardware checks and owns torque teardown.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +24,6 @@ DEFAULT_MOTOR_PLAN = ROOT / "runtime/outputs/vision_pick_place_home.npz"
 DEFAULT_POST_IMAGE = ROOT / "runtime/outputs/post_pick_place.png"
 DEFAULT_POST_JSON = ROOT / "runtime/outputs/post_pick_place_observation.json"
 DEFAULT_EVIDENCE_DIR = Path.home() / "Desktop/so101_vision_pick_place"
-ISAACLAB = Path("/home/teo/IsaacLab/isaaclab.sh")
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +31,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", type=Path, help="Plan from an existing 640x480 image.")
     parser.add_argument("--camera", default="/dev/video0")
     parser.add_argument("--vision-device", default="0")
-    parser.add_argument("--isaac-device", default="cuda:0")
     parser.add_argument("--scene-json", type=Path, default=DEFAULT_SCENE_JSON)
     parser.add_argument("--task-json", type=Path, default=DEFAULT_TASK_JSON)
     parser.add_argument("--motor-plan", type=Path, default=DEFAULT_MOTOR_PLAN)
@@ -44,11 +41,15 @@ def parse_args() -> argparse.Namespace:
         default="proven",
         help="Keep 'proven' for real execution; vision yaw remains experimental.",
     )
-    parser.add_argument("--skip-sim-validation", action="store_true")
+    parser.add_argument(
+        "--skip-sim-validation",
+        action="store_true",
+        help="Deprecated compatibility flag; standalone planning never runs simulation.",
+    )
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="After planning and simulation validation, execute the complete real motion.",
+        help="After standalone planning, execute the complete real motion.",
     )
     parser.add_argument(
         "--confirm",
@@ -64,18 +65,6 @@ def parse_args() -> argparse.Namespace:
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     print("[pipeline] " + " ".join(command), flush=True)
     subprocess.run(command, cwd=ROOT, env=env, check=True)
-
-
-def isaac_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    env.setdefault("TERM", "xterm-256color")
-    # This installation's headless rendering stack still uses the active GDM
-    # X display while creating RTX camera sensors.  Supplying the validated
-    # display environment also avoids a long shutdown stall after planning.
-    env.setdefault("DISPLAY", ":0")
-    env.setdefault("XAUTHORITY", "/run/user/1000/gdm/Xauthority")
-    env.setdefault("CONDA_PREFIX", "/home/teo/miniconda3/envs/env_isaaclab")
-    return env
 
 
 def capture_and_perceive(
@@ -129,8 +118,8 @@ def validate_task(task: dict[str, object]) -> None:
     command = task.get("ik_command")
     if not isinstance(command, list) or not all(isinstance(value, str) for value in command):
         raise RuntimeError("Task program has no valid IK command")
-    expected_planner = str(ROOT / "isaac/plan_real_cartesian.py")
-    if len(command) < 3 or command[0] != str(ISAACLAB) or command[1:3] != ["-p", expected_planner]:
+    expected_planner = str(ROOT / "hardware/plan_pick_place.py")
+    if len(command) < 2 or command[1] != expected_planner:
         raise RuntimeError(f"Refusing unexpected planner command: {command}")
 
 
@@ -159,9 +148,6 @@ def main() -> None:
         raise RuntimeError("Physical execution requires the literal flag: --confirm MOVE")
     if args.execute and args.orientation_mode != "proven":
         raise RuntimeError("Physical execution requires --orientation-mode proven")
-    if not ISAACLAB.exists():
-        raise FileNotFoundError(ISAACLAB)
-
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
     capture_and_perceive(
         image=args.image,
@@ -187,39 +173,19 @@ def main() -> None:
     validate_task(task)
 
     planner_command = list(task["ik_command"])
-    planner_command.extend(
-        ("--output", str(args.motor_plan), "--return-home-after-drop")
-    )
-    run(planner_command, env=isaac_environment())
+    planner_command.extend(("--output", str(args.motor_plan)))
+    run(planner_command)
 
-    if not args.skip_sim_validation:
-        run(
-            [
-                str(ISAACLAB),
-                "-p",
-                str(ROOT / "isaac/validate_real_cartesian_plan.py"),
-                "--headless",
-                "--device",
-                args.isaac_device,
-                "--plan",
-                str(args.motor_plan),
-                "--grasp-assist",
-                "--save-phase-frames",
-            ],
-            env=isaac_environment(),
-        )
-    elif args.execute:
+    if args.execute:
         print(
-            "[pipeline] WARNING: executing without physics replay at the operator's "
-            "explicit request; calibrated geometry and real telemetry guards remain active",
+            "[pipeline] standalone IK plan compiled; real telemetry guards remain active",
             flush=True,
         )
 
     if not args.execute:
         print(
-            f"[pipeline] READY: plan={args.motor_plan} passed compilation"
-            f"{' and simulation validation' if not args.skip_sim_validation else ''}. "
-            "No follower serial port was opened.",
+            f"[pipeline] READY: standalone plan={args.motor_plan} passed numerical checks. "
+            "No follower serial port was opened and no simulation was run.",
             flush=True,
         )
         return
