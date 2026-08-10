@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--drop-x", type=float, required=True)
     parser.add_argument("--drop-y", type=float, required=True)
     parser.add_argument("--drop-z", type=float, required=True)
+    parser.add_argument("--pick-yaw-delta-deg", type=float, default=0.0)
     parser.add_argument("--transport-z", type=float, default=0.175)
     parser.add_argument("--output", type=Path, default=ROOT / "runtime/outputs/real_cartesian_plan.npz")
     parser.add_argument("--no-return-home", action="store_true")
@@ -31,6 +32,7 @@ def main() -> None:
         drop_xyz_m=(args.drop_x, args.drop_y, args.drop_z),
         transport_z_m=args.transport_z,
         return_home=not args.no_return_home,
+        pick_yaw_delta_deg=args.pick_yaw_delta_deg,
     )
     path = build_pick_place_plan(task, args.output)
     print(f"[plan] wrote standalone real-robot plan to {path}")

@@ -64,13 +64,17 @@ HARD_CURRENT_LIMIT_RAW = np.asarray((350, 350, 350, 300, 220, 180), dtype=np.int
 HARD_LOAD_LIMIT_RAW = np.asarray((850, 850, 850, 750, 650, 550), dtype=np.int32)
 TEMPERATURE_LIMIT_C = 55
 HARD_TEMPERATURE_LIMIT_C = 60
+HARD_TEMPERATURE_CONFIRM_READS = 2
 SUSTAINED_TRIP_SAMPLES = 3
 # With torque disabled at teardown, wrist flex repeatedly settles near 75 deg
 # instead of the 57.6 deg demonstration reset.  The controlled startup already
 # interpolates from the measured pose under the normal per-joint speed caps, so
 # allow that single, gravity-sensitive joint a wider reset tolerance.  Other
 # arm joints retain the tight check to reject arbitrary/collision-prone starts.
-START_ERROR_LIMIT = np.asarray((8.0, 8.0, 8.0, 25.0, 8.0, 40.0), dtype=np.float32)
+# Wrist roll can remain rotated after an interrupted yaw-staging run even when
+# every load-bearing joint has settled near reset. It is safe to interpolate
+# that unloaded axis back under the normal speed cap during controlled startup.
+START_ERROR_LIMIT = np.asarray((8.0, 8.0, 8.0, 25.0, 30.0, 40.0), dtype=np.float32)
 
 
 def parse_args() -> argparse.Namespace:
@@ -135,6 +139,19 @@ def parse_args() -> argparse.Namespace:
         "--boundary-capture-dir",
         type=Path,
         help="Capture front and wrist 640x480 frames at the forward phase boundary.",
+    )
+    parser.add_argument(
+        "--capture-dir",
+        type=Path,
+        help="Capture warmed front/wrist evidence at important completed phases.",
+    )
+    parser.add_argument(
+        "--capture-phases",
+        default=(
+            "pick_cartesian_00,pick_cartesian_08,close_gripper,lift_cartesian_00,"
+            "transport_cartesian_08,drop,release,retreat,postdrop_reset"
+        ),
+        help="Comma-separated phase boundaries saved under --capture-dir.",
     )
     return parser.parse_args()
 
@@ -232,6 +249,25 @@ def telemetry_status(
     return soft_trip, hard_trip, error
 
 
+def confirm_temperature_trip(
+    bus: FeetechMotorsBus,
+    telemetry: dict[str, np.ndarray],
+) -> tuple[bool, dict[str, np.ndarray]]:
+    """Confirm a temperature-only hard trip to reject corrupt transient reads."""
+    latest = telemetry
+    for _ in range(HARD_TEMPERATURE_CONFIRM_READS):
+        time.sleep(0.03)
+        latest = read_telemetry(bus)
+        if not np.any(latest["temperature"] > HARD_TEMPERATURE_LIMIT_C):
+            print(
+                "[real] ignored unconfirmed temperature sample: "
+                f"first={telemetry['temperature']} reread={latest['temperature']}",
+                flush=True,
+            )
+            return False, latest
+    return True, latest
+
+
 def monitored_retrace(
     bus: FeetechMotorsBus,
     sent_history: list[np.ndarray],
@@ -322,6 +358,8 @@ def capture_boundary_frames(output_dir: Path, phase: str) -> None:
                 "30",
                 "-i",
                 camera,
+                "-vf",
+                "select=gte(n\\,45)",
                 "-frames:v",
                 "1",
                 "-y",
@@ -454,6 +492,9 @@ def main() -> None:
             raise ValueError("--interrupt-return-speed-scale must be between 0.05 and 1.0")
         if not 0.0 <= args.boundary_hold_seconds <= 30.0:
             raise ValueError("--boundary-hold-seconds must be between 0 and 30")
+        capture_phases = {
+            phase.strip() for phase in args.capture_phases.split(",") if phase.strip()
+        }
         if args.recover_to_start:
             normalized_distance = np.max(
                 np.abs(targets - initial["position"]) / np.maximum(speed_limit, 1.0),
@@ -542,6 +583,7 @@ def main() -> None:
         )
         trip_count = 0
         previous_phase = ""
+        object_released = False
         sent_history: list[np.ndarray] = [initial["position"].copy()]
         print(
             f"[real] EXECUTING {requested_label}: "
@@ -581,12 +623,19 @@ def main() -> None:
             bus.sync_write("Goal_Position", target_dict)
             sent_history.append(target.copy())
             telemetry = read_telemetry(bus)
+            if phase == "release":
+                object_released = True
             # Both an explicit reverse and the planned empty post-drop path
             # move upward/back toward reset against shoulder gravity.  Use the
             # validated return envelope for each; the first full placement
             # otherwise tripped the tighter forward threshold at 9.72 degrees
             # of harmless shoulder lag after the object had been released.
-            returning = phase.startswith("return_") or phase.startswith("postdrop_")
+            returning = (
+                phase.startswith("return_")
+                or phase.startswith("postdrop_")
+                or phase in {"release", "retreat"}
+                or object_released
+            )
             base_phase = phase.removeprefix("return_")
             loaded_motion = (
                 base_phase.startswith("lift_cartesian_")
@@ -598,6 +647,12 @@ def main() -> None:
                 telemetry,
                 returning=returning or loaded_motion,
             )
+            hard_electrical = bool(
+                np.any(np.abs(telemetry["current"]) > HARD_CURRENT_LIMIT_RAW)
+                or np.any(np.abs(telemetry["load"]) > HARD_LOAD_LIMIT_RAW)
+            )
+            if hard_trip and not hard_electrical:
+                hard_trip, telemetry = confirm_temperature_trip(bus, telemetry)
             if hard_trip:
                 reason = (
                     f"hard telemetry limit at sample {index}: error={np.round(error, 2)}, "
@@ -608,6 +663,10 @@ def main() -> None:
                 moving = False
                 return
             trip_count = trip_count + 1 if soft_trip else 0
+            # Reversing a trajectory after release would replay the close-gripper
+            # samples inside the basket and can pick the object back up.  Once the
+            # release begins, only the explicit open-gripper retreat/postdrop path
+            # is allowed; it remains protected by the hard telemetry limits.
             if trip_count >= SUSTAINED_TRIP_SAMPLES and not returning:
                 reason = (
                     f"soft contact/stall telemetry at sample {index}: "
@@ -668,6 +727,22 @@ def main() -> None:
             remaining = period - (time.monotonic() - started)
             if remaining > 0:
                 time.sleep(remaining)
+            phase_complete = index == len(execution_phases) - 1 or execution_phases[index + 1] != phase
+            if (
+                args.capture_dir is not None
+                and phase in capture_phases
+                and phase_complete
+            ):
+                try:
+                    capture_boundary_frames(args.capture_dir, phase)
+                    telemetry = read_telemetry(bus)
+                    _, hard_trip, _ = telemetry_status(target, telemetry, returning=returning)
+                    if hard_trip:
+                        hold_and_release(bus, f"hard telemetry limit after {phase} evidence capture")
+                        moving = False
+                        return
+                except Exception as error:
+                    print(f"[real] phase capture warning at {phase}: {error}", flush=True)
 
         final = read_telemetry(bus)
         print(

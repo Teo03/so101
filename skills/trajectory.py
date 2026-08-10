@@ -21,8 +21,14 @@ CONTROL_HZ = 30.0
 RESET = np.asarray([-4.75, -104.84, 96.18, 57.63, 5.32, 0.65], dtype=np.float32)
 SAFE_UNFOLD_1 = np.asarray([-6.20, -85.80, 65.10, 70.50, 11.60, 29.93], dtype=np.float32)
 SAFE_UNFOLD_2 = np.asarray([-38.30, -5.50, -26.70, 100.00, 1.50, 29.93], dtype=np.float32)
-OPEN_GRIPPER = 29.93
-CLOSED_GRIPPER = 14.30
+# Use the calibrated mechanical maximum for every approach and release.  A
+# partially open jaw reduced the lateral capture window and could leave the
+# package outside one fingertip even when the wrist camera showed a small
+# localization error.
+OPEN_GRIPPER = 88.0
+# Firmer than the original 14.3 degree preload, while retaining clearance for
+# the package thickness instead of driving against the zero-degree hard stop.
+CLOSED_GRIPPER = 8.0
 PICK_ROLL = -32.52
 DROP_ROLL = 17.01
 
@@ -34,6 +40,7 @@ class PickPlaceTask:
     transport_z_m: float = 0.175
     return_home: bool = True
     name: str = "pick_place"
+    pick_yaw_delta_deg: float = 0.0
 
 
 def _with_gripper(arm: np.ndarray, gripper: float) -> np.ndarray:
@@ -62,14 +69,26 @@ def build_pick_place_plan(task: PickPlaceTask, output: Path) -> Path:
     above_pick[2] = task.transport_z_m
     above_drop[2] = task.transport_z_m
 
-    pick_above_seed = np.asarray([-48.88, 16.59, -46.53, 100.00, PICK_ROLL])
-    pick_seed = np.asarray([-48.90, 47.48, -40.85, 87.51, PICK_ROLL])
+    # Real staging established the motor/image sign: a positive detected bar
+    # yaw requires a positive calibrated wrist-roll correction.
+    requested_pick_roll = PICK_ROLL + task.pick_yaw_delta_deg
+    pick_roll = float(np.clip(requested_pick_roll, ARM_SAFE_MIN[4], ARM_SAFE_MAX[4]))
+    applied_yaw_delta = pick_roll - PICK_ROLL
+    if not np.isclose(requested_pick_roll, pick_roll):
+        print(
+            "[plan] wrist orientation saturated at the calibrated joint limit: "
+            f"requested_delta={task.pick_yaw_delta_deg:.1f}deg "
+            f"applied_delta={applied_yaw_delta:.1f}deg",
+            flush=True,
+        )
+    pick_above_seed = np.asarray([-48.88, 16.59, -46.53, 100.00, pick_roll])
+    pick_seed = np.asarray([-48.90, 47.48, -40.85, 87.51, pick_roll])
     drop_seed = np.asarray([1.49, 56.78, -78.45, 75.79, DROP_ROLL])
     descent: list[tuple[str, np.ndarray]] = []
     for index, alpha in enumerate(np.linspace(0.0, 1.0, 9)):
         xyz = (1.0 - alpha) * above_pick + alpha * pick
         seed = (1.0 - alpha) * pick_above_seed + alpha * pick_seed
-        seed = solver.inverse_position(xyz, seed, fixed_wrist_roll_deg=PICK_ROLL)
+        seed = solver.inverse_position(xyz, seed, fixed_wrist_roll_deg=pick_roll)
         descent.append((f"pick_cartesian_{index:02d}", _with_gripper(seed, OPEN_GRIPPER)))
 
     above_drop_q = solver.inverse_position(above_drop, drop_seed, fixed_wrist_roll_deg=DROP_ROLL)
@@ -77,7 +96,7 @@ def build_pick_place_plan(task: PickPlaceTask, output: Path) -> Path:
     seed = descent[0][1][:5]
     for index, alpha in enumerate(np.linspace(0.125, 1.0, 8), start=1):
         xyz = (1.0 - alpha) * above_pick + alpha * above_drop
-        roll = (1.0 - alpha) * PICK_ROLL + alpha * DROP_ROLL
+        roll = (1.0 - alpha) * pick_roll + alpha * DROP_ROLL
         seed_guess = (1.0 - alpha) * descent[0][1][:5] + alpha * above_drop_q
         seed = solver.inverse_position(xyz, seed_guess, fixed_wrist_roll_deg=float(roll), tolerance_m=0.018)
         transport.append((f"transport_cartesian_{index:02d}", _with_gripper(seed, CLOSED_GRIPPER)))
@@ -122,6 +141,8 @@ def build_pick_place_plan(task: PickPlaceTask, output: Path) -> Path:
         "joint_names": JOINT_NAMES,
         "pick_xyz_m": pick.tolist(),
         "drop_xyz_m": drop.tolist(),
+        "pick_yaw_delta_deg": task.pick_yaw_delta_deg,
+        "applied_pick_yaw_delta_deg": applied_yaw_delta,
         "safe_min": SAFE_MIN.tolist(),
         "safe_max": SAFE_MAX.tolist(),
         "speed_limit_per_s": SPEED_LIMIT.tolist(),

@@ -25,7 +25,6 @@ DEFAULT_SCENE = ROOT / "runtime/outputs/scene_observation.json"
 DEFAULT_CALIBRATION = ROOT / "runtime/outputs/current_workspace_calibration.json"
 DEFAULT_OUTPUT = ROOT / "runtime/outputs/vision_task_plan.json"
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", type=Path, default=DEFAULT_SCENE)
@@ -34,10 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--orientation-mode",
         choices=("proven", "vision"),
-        default="proven",
+        default="vision",
         help=(
-            "Use the physically proven wrist orientation by default. 'vision' records "
-            "the experimental image-yaw correction and must be staged before grasping."
+            "Use detected object yaw by default. 'proven' keeps the original fixed wrist roll."
         ),
     )
     return parser.parse_args()
@@ -66,15 +64,16 @@ def main() -> None:
         bar_yaw_delta = float(
             (bar_yaw - reference_yaw + np.pi / 2.0) % np.pi - np.pi / 2.0
         )
+    commanded_yaw_delta = bar_yaw_delta if args.orientation_mode == "vision" else 0.0
     if not (-0.28 <= bar_xy[0] <= 0.02 and -0.14 <= bar_xy[1] <= 0.06):
         raise RuntimeError(f"Detected bar is outside the currently validated pickup region: {bar_xy}")
     if not (-0.02 <= basket_xy[0] <= 0.24 and 0.08 <= basket_xy[1] <= 0.30):
         raise RuntimeError(f"Detected basket is outside the currently validated drop region: {basket_xy}")
 
-    # The drop target is biased 6 cm toward the robot from the visual basket
-    # centre.  This matches the previously validated inner-basket target while
-    # still allowing the basket's X/Y detection to move the task program.
-    drop_xy = basket_xy + np.asarray((-0.08, -0.06), dtype=np.float64)
+    # Aim at the detected basket centre.  The earlier fixed (-8 cm, -6 cm)
+    # offset put the released bar visibly to the left of this basket whenever
+    # its detected centre moved, defeating the point of visual localization.
+    drop_xy = basket_xy.copy()
     # Keep the visual bias inside the independently enforced, physically
     # validated drop envelope.  A basket moved slightly toward the robot can
     # otherwise put the biased point just beyond the near boundary even though
@@ -93,8 +92,8 @@ def main() -> None:
         "calibration": str(args.calibration),
         "orientation_mode": args.orientation_mode,
         "orientation_note": (
-            "Detected XY is physically validated. Vision-derived wrist yaw remains experimental; "
-            "the safe default reuses the proven wrist orientation."
+            "Detected XY and vision-derived wrist yaw feed standalone IK. The real motor/image "
+            "yaw sign was validated through open, close, and lift stages."
         ),
         "objects": {
             "bar": {
@@ -133,6 +132,8 @@ def main() -> None:
             f"{bar_xy[1]:.6f}",
             "--pick-z",
             "0.028535",
+            "--pick-yaw-delta-deg",
+            f"{np.degrees(commanded_yaw_delta):.6f}",
             "--drop-x",
             f"{drop_xy[0]:.6f}",
             "--drop-y",

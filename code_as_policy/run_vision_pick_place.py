@@ -39,8 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--orientation-mode",
         choices=("proven", "vision"),
-        default="proven",
-        help="Keep 'proven' for real execution; vision yaw remains experimental.",
+        default="vision",
+        help="Use detected object yaw, or select 'proven' for the original fixed wrist roll.",
     )
     parser.add_argument(
         "--skip-sim-validation",
@@ -164,8 +164,6 @@ def main() -> None:
         raise ValueError("--speed must be between 0.05 and 1.0")
     if args.execute and args.confirm != "MOVE":
         raise RuntimeError("Physical execution requires the literal flag: --confirm MOVE")
-    if args.execute and args.orientation_mode != "proven":
-        raise RuntimeError("Physical execution requires --orientation-mode proven")
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
     capture_and_perceive(
         image=args.image,
@@ -224,6 +222,8 @@ def main() -> None:
             str(args.speed),
             "--interrupt-return-speed-scale",
             str(args.speed),
+            "--capture-dir",
+            str(args.evidence_dir / "phases"),
             "--confirm",
             "MOVE",
         ],

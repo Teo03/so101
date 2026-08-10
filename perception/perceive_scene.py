@@ -34,8 +34,22 @@ DEFAULT_ANNOTATED = Path.home() / "Desktop/so101_scene_perception.png"
 # Synonyms are deliberately grouped into stable skill-level names.  A new task
 # can change these prompts without changing camera geometry, IK, or execution.
 PROMPT_GROUPS = {
-    "bar": ("wrapped chocolate bar", "chocolate bar", "candy bar"),
+    "bar": (
+        "wrapped chocolate bar",
+        "chocolate bar",
+        "candy bar",
+        "black candy wrapper",
+        "rectangular packaged snack",
+    ),
     "basket": ("wooden basket", "wicker basket", "storage basket"),
+}
+WRIST_PROMPT_GROUPS = {
+    **PROMPT_GROUPS,
+    "bar": (
+        *PROMPT_GROUPS["bar"],
+        "black striped wrapped package",
+        "black rectangular package",
+    ),
 }
 
 
@@ -45,10 +59,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", type=Path, help="Use an existing 640x480 image.")
     parser.add_argument("--capture", type=Path, default=DEFAULT_IMAGE)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
-    parser.add_argument("--confidence", type=float, default=0.05)
+    parser.add_argument("--confidence", type=float, default=0.02)
     parser.add_argument("--device", default="0", help="Ultralytics device, e.g. 0 or cpu.")
     parser.add_argument("--json-output", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--annotated", type=Path, default=DEFAULT_ANNOTATED)
+    parser.add_argument(
+        "--objects",
+        default=",".join(PROMPT_GROUPS),
+        help="Comma-separated semantic objects to detect, e.g. bar or bar,basket.",
+    )
+    parser.add_argument(
+        "--view",
+        choices=("front", "wrist"),
+        default="front",
+        help="Camera geometry profile used to filter prompted masks.",
+    )
     return parser.parse_args()
 
 
@@ -105,18 +130,22 @@ def mask_geometry(mask: np.ndarray) -> dict[str, object]:
 
 
 def semantic_name(prompt: str) -> str:
-    for name, prompts in PROMPT_GROUPS.items():
+    for name, prompts in WRIST_PROMPT_GROUPS.items():
         if prompt in prompts:
             return name
     raise KeyError(prompt)
 
 
-def candidate_score(candidate: dict[str, object]) -> float:
+def candidate_score(candidate: dict[str, object], *, view: str = "front") -> float:
     long_side, short_side = candidate["size_px"]
     aspect = long_side / max(short_side, 1.0)
     confidence = float(candidate["confidence"])
     area = float(candidate["area_px"])
     if candidate["semantic_name"] == "bar":
+        if view == "wrist":
+            if aspect < 1.0 or not 2500.0 <= area <= 200000.0:
+                return -1.0
+            return confidence * min(aspect / 1.8, 1.8) * min(np.sqrt(area / 12000.0), 2.0)
         if aspect < 1.8 or not 800.0 <= area <= 24000.0:
             return -1.0
         return confidence * min(aspect / 2.5, 1.6)
@@ -130,6 +159,8 @@ def run_perception(
     model_path: Path,
     confidence: float,
     device: str,
+    semantic_names: tuple[str, ...] | None = None,
+    view: str = "front",
 ) -> dict[str, object]:
     try:
         from ultralytics import YOLOE
@@ -143,7 +174,12 @@ def run_perception(
     if image is None or image.shape[:2] != (IMAGE_HEIGHT, IMAGE_WIDTH):
         raise RuntimeError(f"Expected a readable {IMAGE_WIDTH}x{IMAGE_HEIGHT} image: {image_path}")
 
-    prompts = [prompt for group in PROMPT_GROUPS.values() for prompt in group]
+    requested = tuple(PROMPT_GROUPS) if semantic_names is None else semantic_names
+    unknown = set(requested) - set(PROMPT_GROUPS)
+    if unknown:
+        raise ValueError(f"Unknown semantic objects: {sorted(unknown)}")
+    prompt_groups = WRIST_PROMPT_GROUPS if view == "wrist" else PROMPT_GROUPS
+    prompts = [prompt for name in requested for prompt in prompt_groups[name]]
     model = YOLOE(str(model_path))
     # Ultralytics resolves the MobileCLIP text encoder relative to the current
     # directory. Keep that large ignored asset in the repository root.
@@ -172,11 +208,11 @@ def run_perception(
                 "bbox_xyxy_px": [float(value) for value in box.xyxy[0].tolist()],
                 **geometry,
             }
-            candidate["selection_score"] = candidate_score(candidate)
+            candidate["selection_score"] = candidate_score(candidate, view=view)
             candidates.append(candidate)
 
     selected: dict[str, dict[str, object]] = {}
-    for semantic in PROMPT_GROUPS:
+    for semantic in requested:
         valid = [
             candidate
             for candidate in candidates
@@ -238,11 +274,21 @@ def annotate(image_path: Path, observation: dict[str, object], output: Path) -> 
 
 def main() -> None:
     args = parse_args()
+    requested = tuple(name.strip() for name in args.objects.split(",") if name.strip())
+    if not requested:
+        raise ValueError("--objects must contain at least one semantic object")
     image_path = args.image
     if image_path is None:
         capture_frame(args.camera, args.capture)
         image_path = args.capture
-    observation = run_perception(image_path, args.model, args.confidence, args.device)
+    observation = run_perception(
+        image_path,
+        args.model,
+        args.confidence,
+        args.device,
+        semantic_names=requested,
+        view=args.view,
+    )
     args.json_output.parent.mkdir(parents=True, exist_ok=True)
     args.json_output.write_text(json.dumps(observation, indent=2) + "\n")
     annotate(image_path, observation, args.annotated)

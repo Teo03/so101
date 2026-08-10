@@ -15,6 +15,7 @@ from skills import PickPlaceTask, build_pick_place_plan
 task = PickPlaceTask(
     pick_xyz_m=(-0.19, -0.05, 0.0285),
     drop_xyz_m=(0.04, 0.14, 0.105),
+    pick_yaw_delta_deg=12.0,
 )
 build_pick_place_plan(task, Path("runtime/outputs/my_task.npz"))
 ```
