@@ -58,8 +58,8 @@ from PIL import Image
 
 import isaaclab.sim as sim_utils
 
-from sim_bar.bridge import lerobot_to_sim_radians
-from sim_bar.scene import FRONT_CAMERA_EYE_M, FRONT_CAMERA_TARGET_M, BarPickPlaceScene
+from isaac.bridge import lerobot_to_sim_radians
+from isaac.scene import FRONT_CAMERA_EYE_M, FRONT_CAMERA_TARGET_M, BarPickPlaceScene
 
 
 CONTROL_FPS = 30.0
@@ -115,7 +115,7 @@ class LeaderClient:
 
 
 def save_frame(image: np.ndarray, name: str) -> None:
-    output_dir = ROOT / "sim_bar/outputs"
+    output_dir = ROOT / "runtime/outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(image).save(output_dir / name)
 

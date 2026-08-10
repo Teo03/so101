@@ -24,7 +24,7 @@ from lerobot.policies.factory import make_pre_post_processors
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHECKPOINT = ROOT / "lerobot/outputs/train/act_bar_pickplace_40ep/checkpoints/020000/pretrained_model"
+DEFAULT_CHECKPOINT = ROOT / "lerobot/outputs/train/act_bar_pickplace_2cam_35ep/checkpoints/last/pretrained_model"
 
 
 def recv_exact(connection: socket.socket, size: int) -> bytes:
@@ -62,16 +62,22 @@ class ACTInferenceServer:
     def reset(self) -> None:
         self.policy.reset()
 
-    def act(self, state: np.ndarray, image: np.ndarray) -> np.ndarray:
+    def act(self, state: np.ndarray, images: dict[str, np.ndarray]) -> np.ndarray:
         if state.shape != (6,):
             raise ValueError(f"Expected state shape (6,), got {state.shape}.")
-        if image.shape != (480, 640, 3):
-            raise ValueError(f"Expected front image shape (480, 640, 3), got {image.shape}.")
+        observation: dict[str, np.ndarray] = {"observation.state": state.astype(np.float32, copy=False)}
+        for feature_name, feature in self.policy.config.input_features.items():
+            if not feature_name.startswith("observation.images."):
+                continue
+            camera_name = feature_name.rsplit(".", 1)[-1]
+            if camera_name not in images:
+                raise ValueError(f"Checkpoint requires camera {camera_name!r}; got {sorted(images)}.")
+            image = images[camera_name]
+            if image.shape != (480, 640, 3):
+                raise ValueError(f"Expected {camera_name} image shape (480, 640, 3), got {image.shape}.")
+            observation[feature_name] = image.astype(np.uint8, copy=False)
         action = predict_action(
-            observation={
-                "observation.state": state.astype(np.float32, copy=False),
-                "observation.images.front": image.astype(np.uint8, copy=False),
-            },
+            observation=observation,
             policy=self.policy,
             device=self.device,
             preprocessor=self.preprocessor,
@@ -101,7 +107,10 @@ def serve(server: ACTInferenceServer, host: str, port: int) -> None:
                             server.reset()
                             send_message(connection, {"ok": True})
                         elif command == "act":
-                            action = server.act(request["state"], request["image"])
+                            images = request.get("images")
+                            if images is None:  # Compatibility with the original front-only evaluator.
+                                images = {"front": request["image"]}
+                            action = server.act(request["state"], images)
                             # A Python list avoids cross-environment NumPy pickle compatibility
                             # issues (LeRobot uses Python 3.12; Isaac Lab uses Python 3.11).
                             send_message(connection, {"ok": True, "action": action.tolist()})

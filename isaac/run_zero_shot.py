@@ -41,8 +41,8 @@ from PIL import Image
 
 import isaaclab.sim as sim_utils
 
-from sim_bar.bridge import lerobot_to_sim_radians, sim_radians_to_lerobot
-from sim_bar.scene import FRONT_CAMERA_EYE_M, FRONT_CAMERA_TARGET_M, BarPickPlaceScene
+from isaac.bridge import lerobot_to_sim_radians, sim_radians_to_lerobot
+from isaac.scene import FRONT_CAMERA_EYE_M, FRONT_CAMERA_TARGET_M, BarPickPlaceScene
 
 
 def recv_exact(connection: socket.socket, size: int) -> bytes:
@@ -81,15 +81,15 @@ class PolicyClient:
     def reset(self) -> None:
         self.request({"command": "reset"})
 
-    def act(self, state: np.ndarray, image: np.ndarray) -> np.ndarray:
-        return np.asarray(self.request({"command": "act", "state": state, "image": image})["action"], dtype=np.float32)
+    def act(self, state: np.ndarray, images: dict[str, np.ndarray]) -> np.ndarray:
+        return np.asarray(self.request({"command": "act", "state": state, "images": images})["action"], dtype=np.float32)
 
     def close(self) -> None:
         self.connection.close()
 
 
 def save_frame(image: np.ndarray, name: str) -> None:
-    output_dir = ROOT / "sim_bar/outputs"
+    output_dir = ROOT / "runtime/outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(image).save(output_dir / name)
 
@@ -115,6 +115,7 @@ def main() -> None:
 
     if args_cli.preview_only:
         save_frame(scene.image(), "initial_frame.png")
+        save_frame(scene.wrist_image(), "initial_wrist_frame.png")
         print("[sim] Preview-only mode: frozen at the recorded real reset pose.", flush=True)
         try:
             for _ in range(args_cli.steps):
@@ -129,15 +130,18 @@ def main() -> None:
     print("[sim] Connected to ACT policy server; starting zero-shot rollout.")
     try:
         for step in range(args_cli.steps):
-            image = scene.image()
+            images = scene.images()
+            image = images["front"]
             if step == 0:
                 save_frame(image, "initial_frame.png")
+                save_frame(images["wrist"], "initial_wrist_frame.png")
             elif step % args_cli.save_every == 0:
                 save_frame(image, f"frame_{step:04d}.png")
+                save_frame(images["wrist"], f"wrist_frame_{step:04d}.png")
 
             joint_radians = scene.robot.data.joint_pos[0, :6].detach().cpu().numpy()
             real_state = sim_radians_to_lerobot(joint_radians)
-            real_action = client.act(real_state, image)
+            real_action = client.act(real_state, images)
             targets = torch.from_numpy(lerobot_to_sim_radians(real_action)).to(scene.scene.device).unsqueeze(0)
 
             # Isaac Lab scene uses 120 Hz physics and we run the policy at 30 Hz.

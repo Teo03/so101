@@ -18,22 +18,23 @@ This repository captures the SO-101 sim-to-real bar pick-and-place calibration w
 
 ## Important files
 
-- `sim_bar/scene.py`: Isaac scene, workspace, and camera calibration.
-- `sim_bar/run_zero_shot.py`: real-policy evaluation in sim.
-- `sim_bar/run_leader_teleop.py`: live leader-arm teleoperation in sim.
-- `sim_bar/leader_server.py`: TCP bridge that reads the physical leader arm.
-- `sim_bar/policy_server.py`: TCP bridge for the saved ACT checkpoint.
-- `sim_bar/convert_scans_to_usd.py`: converts textured scan assets into Isaac-friendly USD.
-- `sim_bar/README.md`: working run instructions.
+- `isaac/scene.py`: Isaac scene, workspace, and camera calibration.
+- `isaac/run_zero_shot.py`: real-policy evaluation in sim.
+- `isaac/run_leader_teleop.py`: live leader-arm teleoperation in sim.
+- `hardware/leader_server.py`: TCP bridge that reads the physical leader arm.
+- `act/policy_server.py`: TCP bridge for the saved ACT checkpoint.
+- `assets/convert_scans_to_usd.py`: converts textured scan assets into Isaac-friendly USD.
+- `assets/scans/`: basket/bar GLBs, converted USDs, and their texture tree.
+- `OPERATIONS.md`: working run instructions.
 - `lerobot/`: private LeRobot submodule containing the validated real-robot DAgger changes.
 
 ## Current workflow
 
-1. Start `sim_bar/leader_server.py` with the physical leader on `/dev/ttyACM0`.
-2. Run `sim_bar/run_leader_teleop.py` in Isaac Lab on `DISPLAY=:0`.
+1. Start `hardware/leader_server.py` with the physical leader on `/dev/ttyACM0`.
+2. Run `isaac/run_leader_teleop.py` in Isaac Lab on `DISPLAY=:0`.
 3. Use `--record_dir` to save sim demos when collecting data.
-4. Compare the frozen preview frame from `sim_bar/run_zero_shot.py --preview_only` against the latest real camera shot before changing object placement or scale.
-5. Run `sim_bar/policy_server.py` and `sim_bar/run_zero_shot.py` to test the real model in sim.
+4. Compare the frozen preview frame from `isaac/run_zero_shot.py --preview_only` against the latest real camera shot before changing object placement or scale.
+5. Run `act/policy_server.py` and `isaac/run_zero_shot.py` to test the real model in sim.
 6. For new workspaces, prefer scanning the real objects, converting them to USD, importing the scanned assets into Isaac, and then validating with the same camera before collecting demonstrations or training.
 
 ## Validated real-robot DAgger correction workflow
@@ -91,18 +92,33 @@ Correction-only collection semantics and training goal:
 - The DAgger objective is to add expert actions specifically for states the learned
   policy visits and mishandles. Keep the original full demonstrations so task coverage
   is preserved; corrections teach recovery and reduce compounding error.
-- Structurally validated correction data currently exists in the two `v5` runs and the
-  `v6` run: 5 episodes, 1,109 frames, approximately 37 seconds. Keep `v2` excluded
-  because it was collected with the bad mapping. Visually review every retained clip
-  before aggregation.
-- Collect roughly 20-30 varied, successful correction clips before the first ACT
-  fine-tune. Build a new aggregate from the original 35 demonstrations plus reviewed
-  corrections, ensure corrections contribute about 20-30% of training samples, then
-  fine-tune from the current checkpoint and compare fixed real-world trial sets. Repeat
-  collection/fine-tuning rounds until intervention frequency falls without regressing
-  previously successful parts of the task.
+- DAgger round 1 was completed on 2026-08-10 using `v10` (17 episodes, 3,912 frames)
+  and `v11` (8 episodes, 1,384 frames): 25 reviewed correction clips and 5,296 frames
+  total (approximately 176.5 seconds). All clips were visually reviewed, both camera
+  streams decoded end-to-end, timestamps and frame indices were continuous, actions
+  were finite, and correction joint steps stayed within the original demonstration
+  envelope.
+- Training-clean copies remove only the correction-specific `intervention` feature:
+  `rollout_hotwheels_corrections_round1_v10_trainclean` and
+  `rollout_hotwheels_corrections_round1_v11_trainclean`. The source `v10` and `v11`
+  datasets remain untouched.
+- The first aggregate is
+  `local/hotwheels_hanging_35ep_dagger_round1_60ep`: 35 original demonstrations plus
+  25 corrections, 60 episodes and 24,128 frames. Corrections contribute 21.95% of its
+  frames. Boundary samples between all three source datasets were decoded and checked.
+- ACT was fine-tuned from the original 20,000-step checkpoint for 10,000 additional
+  optimizer steps with batch size 8 and learning rate `1e-5`. The final training loss
+  was 0.118. The output is
+  `/home/teo/so101/lerobot/outputs/train/act_hotwheels_hanging_dagger_round1_60ep` and
+  its validated policy is at `checkpoints/last/pretrained_model` (`last` points to
+  `010000`). The policy loads on CUDA, all 51,597,190 parameters are finite, and its
+  preprocessing and postprocessing pipelines load successfully.
+- Before another correction round, compare the original and round-1 policies on the
+  same fixed set of real-world starting arrangements. Record success/failure and the
+  number of interventions. Continue DAgger only for failures that remain systematic,
+  while checking that already-successful task phases have not regressed.
 
-Validated command:
+Next-round correction command (use a fresh dataset ID):
 
 ```bash
 DISPLAY=:0 \
@@ -114,10 +130,10 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128 \
   --strategy.relative_clutch_handover=false \
   --strategy.smooth_leader_to_follower_handover=true \
   --strategy.record_autonomous=false \
-  --strategy.num_episodes=10 \
+  --strategy.num_episodes=25 \
   --strategy.input_device=keyboard \
   --inference.type=sync \
-  --policy.path=/home/teo/so101/lerobot/outputs/train/act_hotwheels_hanging_35ep/checkpoints/last/pretrained_model \
+  --policy.path=/home/teo/so101/lerobot/outputs/train/act_hotwheels_hanging_dagger_round1_60ep/checkpoints/last/pretrained_model \
   --policy.n_action_steps=100 \
   --robot.type=so101_follower \
   --robot.port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D049262-if00 \
@@ -126,17 +142,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128 \
   --teleop.type=so101_leader \
   --teleop.port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B14030274-if00 \
   --teleop.id=my_leader \
-  --dataset.repo_id=local/rollout_hotwheels_corrections_v6 \
+  --dataset.repo_id=local/rollout_hotwheels_corrections_round2_v12 \
   --dataset.single_task="Pick up the packaged Hot Wheels car and hang it on the empty hook" \
   --dataset.fps=30 \
-  --dataset.num_episodes=10 \
+  --dataset.num_episodes=25 \
   --dataset.push_to_hub=false \
   --dataset.streaming_encoding=false \
   --fps=30 \
-  --duration=3000 \
-  --display_data=true \
-  --display_mode=rerun \
-  --display_compressed_images=true \
+  --duration=3600 \
+  --display_data=false \
   --return_to_initial_position=true
 ```
 
@@ -147,9 +161,13 @@ Operational notes:
 - Keep the leader's long handle and the workspace clear during automatic alignment and
   automatic return-to-start.
 - Initial inference, the intentional smooth handover, and AV1 episode encoding can emit
-  temporary slow-loop warnings. Compressed Rerun images plus unregistering Rerun's
-  `atexit` retry before bounded shutdown avoid the previous visualization backpressure
-  hang.
+  temporary slow-loop warnings. Keep `--display_data=false` during hardware collection:
+  Rerun backpressure previously blocked the synchronous control loop and made the
+  follower appear to stop following the leader.
+- The `v10` run ended after 17 saved corrections because leader servo ID 6 reported an
+  input-voltage error while torque was being enabled. The safety rollback and follower
+  return-to-start completed. Power-cycle the leader and check its supply and cabling
+  before retrying a voltage fault; do not repeatedly force torque enable.
 - If a run is force-killed or motor torque state is uncertain, power-cycle the affected
   arm before touching it or starting another run.
 - Corrections collected before exact mapping was fixed (notably early `v1`/`v2` runs)
@@ -167,19 +185,19 @@ Operational notes:
   to `Teo03/lerobot-so101-dagger` is required.
 - Generated sim demos and render outputs are not meant to be committed by default.
 - For scanned assets, preserve the textured visible mesh, then add a simple hidden collision proxy if the asset does not already include usable physics.
-- If the sim view drifts from the real view, first compare `sim_bar/outputs/initial_frame.png` with the real camera frame before changing the robot or policy.
+- If the sim view drifts from the real view, first compare `runtime/outputs/initial_frame.png` with the real camera frame before changing the robot or policy.
 - Tricky but useful commands:
-  - `TERM=xterm-256color DISPLAY=:0 CONDA_PREFIX=/home/teo/miniconda3/envs/env_isaaclab /home/teo/IsaacLab/isaaclab.sh -p /home/teo/so101/sim_bar/run_zero_shot.py --preview_only --steps 1 --rendering_mode balanced --device cuda`
-  - `TERM=xterm-256color DISPLAY=:0 CONDA_PREFIX=/home/teo/miniconda3/envs/env_isaaclab /home/teo/IsaacLab/isaaclab.sh -p /home/teo/so101/sim_bar/run_leader_teleop.py --host 127.0.0.1 --port 5560 --steps 100000 --save_every 300 --rendering_mode balanced --device cuda`
-  - `./.venv/bin/python sim_bar/leader_server.py --leader_port /dev/ttyACM0 --leader_id my_leader --port 5560`
-  - `./.venv/bin/python sim_bar/policy_server.py --port 5557`
-- The policy and teleop scripts save their first camera frame automatically, so the fast calibration loop is: run preview, compare `sim_bar/outputs/initial_frame.png`, adjust `sim_bar/scene.py`, rerun.
+  - `TERM=xterm-256color DISPLAY=:0 CONDA_PREFIX=/home/teo/miniconda3/envs/env_isaaclab /home/teo/IsaacLab/isaaclab.sh -p /home/teo/so101/isaac/run_zero_shot.py --preview_only --steps 1 --rendering_mode balanced --device cuda`
+  - `TERM=xterm-256color DISPLAY=:0 CONDA_PREFIX=/home/teo/miniconda3/envs/env_isaaclab /home/teo/IsaacLab/isaaclab.sh -p /home/teo/so101/isaac/run_leader_teleop.py --host 127.0.0.1 --port 5560 --steps 100000 --save_every 300 --rendering_mode balanced --device cuda`
+  - `./.venv/bin/python hardware/leader_server.py --leader_port /dev/ttyACM0 --leader_id my_leader --port 5560`
+  - `./.venv/bin/python act/policy_server.py --port 5557`
+- The policy and teleop scripts save their first camera frame automatically, so the fast calibration loop is: run preview, compare `runtime/outputs/initial_frame.png`, adjust `isaac/scene.py`, rerun.
 - Scan conversion settings that mattered:
   - Use Isaac Sim's asset converter in a headless `SimulationApp`.
   - Enable `embed_textures=True` and `export_preview_surface=True` so the scan stays visually faithful inside USD.
   - Set `use_meter_as_world_unit=True` to keep the imported scan sizes consistent with Isaac Lab.
   - Ignore animations, cameras, and lights when converting scan meshes.
-- The object setup flow is now: scan the real object, convert to textured USD, import the USD into `sim_bar/scene.py`, tune scale/orientation/placement against the same camera view, then validate with teleop or the saved policy before collecting more demos.
+- The object setup flow is now: scan the real object, convert to textured USD, import the USD into `isaac/scene.py`, tune scale/orientation/placement against the same camera view, then validate with teleop or the saved policy before collecting more demos.
 - Consolidated operating notes from the earlier project memory:
   - Workspace: `/home/teo/so101`
   - Hardware variant: 5V/7.4V SO-101
@@ -194,9 +212,9 @@ Operational notes:
     - `/home/teo/so101/lerobot/outputs/train/act_pickplace_30ep/checkpoints/last/pretrained_model`
     - `/home/teo/so101/lerobot/outputs/train/act_bar_pickplace_40ep/checkpoints/last/pretrained_model`
 - Waddle-style non-ACT proof completed on 2026-07-30:
-  - `sim_bar/perceive_scene.py` uses prompted YOLOE segmentation for the bar and basket.
-  - `sim_bar/workspace_geometry.py` maps pixels to robot-base XY through a planar homography.
-  - `sim_bar/plan_from_scene.py` writes a reusable task/skill program and Isaac Lab IK command.
+  - `perception/perceive_scene.py` uses prompted YOLOE segmentation for the bar and basket.
+  - `perception/workspace_geometry.py` maps pixels to robot-base XY through a planar homography.
+  - `code_as_policy/plan_from_scene.py` writes a reusable task/skill program and Isaac Lab IK command.
   - The real bar was successfully localized, grasped, lifted, lowered, and released using
     detected X/Y plus the physically proven wrist orientation.
   - A complete second run transported the bar and visibly dropped it inside the basket;
@@ -208,5 +226,5 @@ Operational notes:
   - Vision-derived wrist yaw is not yet physically validated. Keep `orientation-mode=proven`
     unless a staged wrist-camera check confirms both fingers straddle the object.
   - For a new camera/table setup, collect at least four spread-out pixel/robot XY
-    correspondences and use `sim_bar/calibrate_workspace.py`; do not reuse the current
+    correspondences and use `perception/calibrate_workspace.py`; do not reuse the current
     homography after moving the camera.
