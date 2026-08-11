@@ -14,6 +14,7 @@ import json
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -63,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default=0.50,
         help="One speed for every task phase, from 0.05 to 1.0.",
     )
+    parser.add_argument(
+        "--evidence",
+        action="store_true",
+        help="Pause at important phases to save front/wrist evidence images.",
+    )
     return parser.parse_args()
 
 
@@ -92,21 +98,37 @@ def capture_and_perceive(
     annotated: Path,
     device: str,
 ) -> None:
-    command = [
-        sys.executable,
-        str(ROOT / "perception/perceive_scene.py"),
-        "--device",
-        device,
-        "--json-output",
-        str(output_json),
-        "--annotated",
-        str(annotated),
-    ]
-    if image is None:
-        command.extend(("--camera", camera, "--capture", str(output_image)))
-    else:
-        command.extend(("--image", str(image)))
-    run(command)
+    attempts = 4 if image is None else 1
+    # Never let a failed attempt leave a previously valid observation behind.
+    output_json.unlink(missing_ok=True)
+    for attempt in range(1, attempts + 1):
+        command = [
+            sys.executable,
+            str(ROOT / "perception/perceive_scene.py"),
+            "--device",
+            device,
+            "--json-output",
+            str(output_json),
+            "--annotated",
+            str(annotated),
+        ]
+        if image is None:
+            command.extend(("--camera", camera, "--capture", str(output_image)))
+        else:
+            command.extend(("--image", str(image)))
+        try:
+            run(command)
+            return
+        except subprocess.CalledProcessError:
+            output_json.unlink(missing_ok=True)
+            if attempt == attempts:
+                raise
+            print(
+                f"[vision] detection attempt {attempt}/{attempts} was inconclusive; "
+                "capturing a fresh frame",
+                flush=True,
+            )
+            time.sleep(0.2)
 
 
 def validate_task(task: dict[str, object]) -> None:
@@ -206,8 +228,7 @@ def main() -> None:
         )
         return
 
-    run(
-        [
+    executor_command = [
             sys.executable,
             str(ROOT / "hardware/run_real_cartesian.py"),
             "--plan",
@@ -222,11 +243,13 @@ def main() -> None:
             str(args.speed),
             "--interrupt-return-speed-scale",
             str(args.speed),
-            "--capture-dir",
-            str(args.evidence_dir / "phases"),
             "--confirm",
             "MOVE",
-        ],
+        ]
+    if args.evidence:
+        executor_command.extend(("--capture-dir", str(args.evidence_dir / "phases")))
+    run(
+        executor_command,
         child_handles_sigint=True,
     )
 

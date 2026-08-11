@@ -16,7 +16,10 @@ from kinematics.so101 import SO101Kinematics
 JOINT_NAMES = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 SAFE_MIN = np.append(ARM_SAFE_MIN, 0.0).astype(np.float32)
 SAFE_MAX = np.append(ARM_SAFE_MAX, 88.0).astype(np.float32)
-SPEED_LIMIT = np.asarray([18.0, 22.0, 22.0, 18.0, 16.0, 24.0], dtype=np.float32)
+# 85th-percentile per-joint velocities measured from the 35 physically
+# demonstrated bar pick/place episodes. This makes speed=1.0 ACT-like without
+# using the higher-acceleration tail that the scripted unfold could not follow.
+SPEED_LIMIT = np.asarray([24.0, 58.0, 61.0, 32.0, 16.0, 24.0], dtype=np.float32)
 CONTROL_HZ = 30.0
 RESET = np.asarray([-4.75, -104.84, 96.18, 57.63, 5.32, 0.65], dtype=np.float32)
 SAFE_UNFOLD_1 = np.asarray([-6.20, -85.80, 65.10, 70.50, 11.60, 29.93], dtype=np.float32)
@@ -51,9 +54,13 @@ def _interpolate(waypoints: list[tuple[str, np.ndarray]]) -> tuple[np.ndarray, n
     samples = [waypoints[0][1].copy()]
     phases = [waypoints[0][0]]
     for (_, previous), (name, target) in zip(waypoints, waypoints[1:], strict=False):
-        seconds = float(np.max(np.abs(target - previous) / SPEED_LIMIT))
-        count = max(2, int(np.ceil(max(1.0, seconds) * CONTROL_HZ)))
-        for alpha in np.linspace(0.0, 1.0, count + 1, dtype=np.float32)[1:]:
+        # Cubic smoothstep has zero velocity at both ends and a peak derivative
+        # of 1.5. Account for that factor so peak joint velocity, not merely
+        # average velocity, stays inside the demonstrated ACT envelope.
+        seconds = 1.5 * float(np.max(np.abs(target - previous) / SPEED_LIMIT))
+        count = max(2, int(np.ceil(seconds * CONTROL_HZ)))
+        for progress in np.linspace(0.0, 1.0, count + 1, dtype=np.float32)[1:]:
+            alpha = progress * progress * (3.0 - 2.0 * progress)
             samples.append((1.0 - alpha) * previous + alpha * target)
             phases.append(name)
     return np.stack(samples).astype(np.float32), np.asarray(phases)
@@ -103,7 +110,10 @@ def build_pick_place_plan(task: PickPlaceTask, output: Path) -> Path:
     drop_q = solver.inverse_position(drop, drop_seed, fixed_wrist_roll_deg=DROP_ROLL)
 
     sparse: list[tuple[str, np.ndarray]] = [
-        ("reset", RESET.copy()),
+        # Home is an open-gripper state. This matches the explicit post-drop
+        # reset and avoids closing from 88 degrees only to reopen immediately
+        # at the start of the next task.
+        ("reset", np.append(RESET[:5], OPEN_GRIPPER).astype(np.float32)),
         ("open_gripper", np.append(RESET[:5], OPEN_GRIPPER).astype(np.float32)),
         ("safe_unfold_1", SAFE_UNFOLD_1.copy()),
         ("safe_unfold_2", SAFE_UNFOLD_2.copy()),
@@ -131,8 +141,23 @@ def build_pick_place_plan(task: PickPlaceTask, output: Path) -> Path:
         )
 
     targets, phases = _interpolate(sparse)
-    if np.any(targets < SAFE_MIN) or np.any(targets > SAFE_MAX):
-        raise RuntimeError("Standalone plan escaped the demonstrated joint envelope")
+    envelope_tolerance_deg = 0.02
+    if np.any(targets < SAFE_MIN - envelope_tolerance_deg) or np.any(
+        targets > SAFE_MAX + envelope_tolerance_deg
+    ):
+        below = np.argwhere(targets < SAFE_MIN - envelope_tolerance_deg)
+        above = np.argwhere(targets > SAFE_MAX + envelope_tolerance_deg)
+        details: list[str] = []
+        for sample, joint in np.concatenate((below, above))[:8]:
+            details.append(
+                f"{phases[sample]}/{JOINT_NAMES[joint]}="
+                f"{targets[sample, joint]:.2f} outside "
+                f"[{SAFE_MIN[joint]:.2f}, {SAFE_MAX[joint]:.2f}]"
+            )
+        raise RuntimeError(
+            "Standalone plan escaped the demonstrated joint envelope: " + "; ".join(details)
+        )
+    targets = np.clip(targets, SAFE_MIN, SAFE_MAX)
     metadata = {
         "format": "so101-real-cartesian-plan-v1",
         "planner": "standalone-placo",

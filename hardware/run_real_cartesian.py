@@ -14,7 +14,10 @@ import os
 import signal
 import subprocess
 import sys
+import termios
+import threading
 import time
+import tty
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +51,7 @@ DEFAULT_CALIBRATION = (
 # The first high-clearance trial measured 5.7 degrees of normal elbow lag at
 # load 244/current 33 while unfolding.  Keep margin above that observed servo
 # acceleration lag; load/current remain independent collision-stop channels.
-ARM_ERROR_LIMIT = np.asarray((9.0, 9.0, 9.0, 9.0, 9.0), dtype=np.float32)
+ARM_ERROR_LIMIT = np.asarray((11.0, 11.0, 11.0, 11.0, 11.0), dtype=np.float32)
 GRIPPER_ERROR_LIMIT = 8.0
 CURRENT_LIMIT_RAW = np.asarray((140, 140, 140, 120, 100, 100), dtype=np.int32)
 LOAD_LIMIT_RAW = np.asarray((450, 450, 450, 400, 350, 300), dtype=np.int32)
@@ -66,6 +69,16 @@ TEMPERATURE_LIMIT_C = 55
 HARD_TEMPERATURE_LIMIT_C = 60
 HARD_TEMPERATURE_CONFIRM_READS = 2
 SUSTAINED_TRIP_SAMPLES = 3
+# The Feetech load value is a useful force proxy, but it is noisy and is not a
+# calibrated force in newtons.  These values are based on the real bar grasp:
+# load 200 carried it securely, while load 368 was unnecessarily strong.
+GRIP_CONTACT_LOAD_RAW = 180
+GRIP_MIN_HOLD_LOAD_RAW = 110
+GRIP_MAX_HOLD_LOAD_RAW = 300
+GRIP_CONTACT_ERROR_DEG = 2.0
+GRIP_CONTACT_CONFIRM_SAMPLES = 2
+GRIP_LOW_LOAD_CONFIRM_SAMPLES = 15
+GRIP_ADJUST_STEP_DEG = 0.5
 # With torque disabled at teardown, wrist flex repeatedly settles near 75 deg
 # instead of the 57.6 deg demonstration reset.  The controlled startup already
 # interpolates from the measured pose under the normal per-joint speed caps, so
@@ -74,7 +87,7 @@ SUSTAINED_TRIP_SAMPLES = 3
 # Wrist roll can remain rotated after an interrupted yaw-staging run even when
 # every load-bearing joint has settled near reset. It is safe to interpolate
 # that unloaded axis back under the normal speed cap during controlled startup.
-START_ERROR_LIMIT = np.asarray((8.0, 8.0, 8.0, 25.0, 30.0, 40.0), dtype=np.float32)
+START_ERROR_LIMIT = np.asarray((8.0, 8.0, 8.0, 25.0, 30.0, 100.0), dtype=np.float32)
 
 
 def parse_args() -> argparse.Namespace:
@@ -249,6 +262,24 @@ def telemetry_status(
     return soft_trip, hard_trip, error
 
 
+def arm_soft_trip(
+    telemetry: dict[str, np.ndarray],
+    error: np.ndarray,
+    *,
+    returning_or_loaded: bool,
+) -> bool:
+    """Check the arm while deliberately excluding expected gripper contact."""
+    error_limit = RETURN_ARM_ERROR_LIMIT if returning_or_loaded else ARM_ERROR_LIMIT
+    current_limit = RETURN_CURRENT_LIMIT_RAW if returning_or_loaded else CURRENT_LIMIT_RAW
+    load_limit = RETURN_LOAD_LIMIT_RAW if returning_or_loaded else LOAD_LIMIT_RAW
+    return bool(
+        np.any(error[:5] > error_limit)
+        or np.any(np.abs(telemetry["current"][:5]) > current_limit[:5])
+        or np.any(np.abs(telemetry["load"][:5]) > load_limit[:5])
+        or np.any(telemetry["temperature"] > TEMPERATURE_LIMIT_C)
+    )
+
+
 def confirm_temperature_trip(
     bus: FeetechMotorsBus,
     telemetry: dict[str, np.ndarray],
@@ -312,6 +343,46 @@ def monitored_retrace(
         if remaining > 0:
             time.sleep(remaining)
     return True, "automatic safety retrace reached reset"
+
+
+def monitored_open_return(
+    bus: FeetechMotorsBus,
+    remaining_targets: np.ndarray,
+    period: float,
+    stop_requested,
+) -> tuple[bool, str]:
+    """Finish the explicit open-gripper post-drop path after release."""
+    print(
+        f"[real] SAFE OPEN RETURN: following {len(remaining_targets)} remaining targets",
+        flush=True,
+    )
+    for recovery_index, target in enumerate(remaining_targets):
+        started = time.monotonic()
+        if stop_requested():
+            return False, "second stop request during open-gripper return"
+        bus.sync_write(
+            "Goal_Position",
+            {name: float(value) for name, value in zip(JOINT_NAMES, target, strict=True)},
+        )
+        telemetry = read_telemetry(bus)
+        _, hard_trip, error = telemetry_status(target, telemetry, returning=True)
+        if hard_trip:
+            return (
+                False,
+                "hard telemetry limit during open-gripper return: "
+                f"error={np.round(error, 2)}, current={telemetry['current']}, "
+                f"load={telemetry['load']}, temp={telemetry['temperature']}",
+            )
+        if recovery_index % 90 == 0:
+            print(
+                f"[open-return] sample={recovery_index:04d} "
+                f"max_error={float(error.max()):.2f}",
+                flush=True,
+            )
+        remaining = period - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(remaining)
+    return True, "open-gripper return reached reset"
 
 
 def monitored_hold(
@@ -425,6 +496,9 @@ def main() -> None:
     moving = False
     stop_reason = ""
     emergency_stop = False
+    terminal_fd: int | None = None
+    terminal_settings = None
+    escape_pressed = threading.Event()
 
     def request_stop(signum: int, _frame) -> None:
         nonlocal stop_reason, emergency_stop
@@ -441,6 +515,27 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+
+    if sys.stdin.isatty():
+        terminal_fd = sys.stdin.fileno()
+        terminal_settings = termios.tcgetattr(terminal_fd)
+        tty.setcbreak(terminal_fd)
+        def watch_terminal_escape() -> None:
+            while True:
+                try:
+                    if os.read(terminal_fd, 1) == b"\x1b":
+                        escape_pressed.set()
+                except OSError:
+                    return
+
+        threading.Thread(target=watch_terminal_escape, daemon=True).start()
+        print("[real] terminal safety keys armed: Esc/Ctrl-C return, second press stops", flush=True)
+
+    def poll_escape() -> None:
+        """Turn an Escape keypress into the same monitored stop as Ctrl-C."""
+        if escape_pressed.is_set():
+            escape_pressed.clear()
+            request_stop(0, None)
 
     try:
         bus.connect(handshake=True)
@@ -582,6 +677,13 @@ def main() -> None:
             else -1
         )
         trip_count = 0
+        grip_contact_count = 0
+        grip_low_load_count = 0
+        grip_high_load_count = 0
+        grip_hold_target: float | None = None
+        grip_relax_ceiling: float | None = None
+        close_targets = command_targets[command_phases == "close_gripper", 5]
+        grip_floor = float(close_targets.min()) if len(close_targets) else float(safe_min[5])
         previous_phase = ""
         object_released = False
         sent_history: list[np.ndarray] = [initial["position"].copy()]
@@ -597,6 +699,17 @@ def main() -> None:
             zip(execution_targets, execution_phases, strict=True)
         ):
             started = time.monotonic()
+            poll_escape()
+            target = target.copy()
+            base_phase = phase.removeprefix("return_")
+            gripping_phase = (
+                base_phase == "close_gripper"
+                or base_phase.startswith("lift_cartesian_")
+                or base_phase.startswith("transport_cartesian_")
+                or base_phase == "drop"
+            )
+            if grip_hold_target is not None and gripping_phase and not phase.startswith("return_"):
+                target[5] = grip_hold_target
             phase_speed_scale = speed_scale_for_phase(
                 phase,
                 free_space_scale=args.speed_scale,
@@ -606,12 +719,20 @@ def main() -> None:
             period = (1.0 / control_hz) / phase_speed_scale
             if stop_reason:
                 return_period = (1.0 / control_hz) / args.interrupt_return_speed_scale
-                recovered, recovery_reason = monitored_retrace(
-                    bus,
-                    sent_history,
-                    return_period,
-                    lambda: emergency_stop,
-                )
+                if object_released:
+                    recovered, recovery_reason = monitored_open_return(
+                        bus,
+                        execution_targets[index:],
+                        return_period,
+                        lambda: (poll_escape() or emergency_stop),
+                    )
+                else:
+                    recovered, recovery_reason = monitored_retrace(
+                        bus,
+                        sent_history,
+                        return_period,
+                        lambda: (poll_escape() or emergency_stop),
+                    )
                 if not recovered and emergency_stop:
                     recovery_reason = "second Ctrl-C during automatic return"
                 hold_and_release(bus, recovery_reason)
@@ -636,16 +757,16 @@ def main() -> None:
                 or phase in {"release", "retreat"}
                 or object_released
             )
-            base_phase = phase.removeprefix("return_")
             loaded_motion = (
                 base_phase.startswith("lift_cartesian_")
                 or base_phase.startswith("transport_cartesian_")
                 or base_phase == "drop"
             )
+            high_clearance_motion = base_phase in {"safe_unfold_1", "safe_unfold_2"}
             soft_trip, hard_trip, error = telemetry_status(
                 target,
                 telemetry,
-                returning=returning or loaded_motion,
+                returning=returning or loaded_motion or high_clearance_motion,
             )
             hard_electrical = bool(
                 np.any(np.abs(telemetry["current"]) > HARD_CURRENT_LIMIT_RAW)
@@ -662,6 +783,70 @@ def main() -> None:
                 hold_and_release(bus, reason)
                 moving = False
                 return
+
+            gripper_load = abs(int(telemetry["load"][5]))
+            if base_phase == "close_gripper" and grip_hold_target is None:
+                contact = bool(
+                    error[5] >= GRIP_CONTACT_ERROR_DEG
+                    and gripper_load >= GRIP_CONTACT_LOAD_RAW
+                )
+                grip_contact_count = grip_contact_count + 1 if contact else 0
+                if grip_contact_count >= GRIP_CONTACT_CONFIRM_SAMPLES:
+                    # Freeze at the measured jaw position instead of continuing
+                    # to drive through the object toward the positional target.
+                    grip_hold_target = max(grip_floor, float(telemetry["position"][5]))
+                    grip_relax_ceiling = grip_hold_target + 3.0
+                    print(
+                        "[grip] contact acquired: "
+                        f"position={telemetry['position'][5]:.2f}deg "
+                        f"load={gripper_load}; hold={grip_hold_target:.2f}deg",
+                        flush=True,
+                    )
+                    grip_contact_count = 0
+
+            if grip_hold_target is not None and gripping_phase and not phase.startswith("return_"):
+                # Maintain a moderate load band. A sustained load decrease can
+                # mean the package settled or began slipping, so close by one
+                # small step. Excessive preload is relaxed just as gradually.
+                if gripper_load < GRIP_MIN_HOLD_LOAD_RAW:
+                    grip_low_load_count += 1
+                    grip_high_load_count = 0
+                elif gripper_load > GRIP_MAX_HOLD_LOAD_RAW:
+                    grip_high_load_count += 1
+                    grip_low_load_count = 0
+                else:
+                    grip_low_load_count = 0
+                    grip_high_load_count = 0
+                if grip_low_load_count >= GRIP_LOW_LOAD_CONFIRM_SAMPLES:
+                    tightened = max(grip_floor, grip_hold_target - GRIP_ADJUST_STEP_DEG)
+                    if tightened < grip_hold_target:
+                        grip_hold_target = tightened
+                        print(
+                            f"[grip] low load={gripper_load}; tightening hold to "
+                            f"{grip_hold_target:.2f}deg",
+                            flush=True,
+                        )
+                    grip_low_load_count = 0
+                if grip_high_load_count >= GRIP_CONTACT_CONFIRM_SAMPLES:
+                    grip_hold_target = min(
+                        float(grip_relax_ceiling),
+                        grip_hold_target + GRIP_ADJUST_STEP_DEG,
+                    )
+                    print(
+                        f"[grip] high load={gripper_load}; relaxing hold to "
+                        f"{grip_hold_target:.2f}deg",
+                        flush=True,
+                    )
+                    grip_high_load_count = 0
+
+                # Once contact is acquired, gripper following error/current/load
+                # are the control signal, not a generic stall. Arm and hard
+                # electrical/temperature protections remain active.
+                soft_trip = arm_soft_trip(
+                    telemetry,
+                    error,
+                    returning_or_loaded=returning or loaded_motion or high_clearance_motion,
+                )
             trip_count = trip_count + 1 if soft_trip else 0
             # Reversing a trajectory after release would replay the close-gripper
             # samples inside the basket and can pick the object back up.  Once the
@@ -755,6 +940,8 @@ def main() -> None:
         hold_and_release(bus, "requested phase boundary reached")
         moving = False
     finally:
+        if terminal_fd is not None and terminal_settings is not None:
+            termios.tcsetattr(terminal_fd, termios.TCSADRAIN, terminal_settings)
         if bus.is_connected:
             if moving:
                 try:

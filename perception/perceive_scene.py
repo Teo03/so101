@@ -26,7 +26,7 @@ if LOCAL_VISION_PACKAGES.exists():
 
 IMAGE_WIDTH = 640
 IMAGE_HEIGHT = 480
-DEFAULT_MODEL = ROOT / "models/yoloe-26n-seg.pt"
+DEFAULT_MODEL = ROOT / "models/yoloe-26x-seg.pt"
 DEFAULT_IMAGE = ROOT / "runtime/outputs/scene_live.png"
 DEFAULT_JSON = ROOT / "runtime/outputs/scene_observation.json"
 DEFAULT_ANNOTATED = Path.home() / "Desktop/so101_scene_perception.png"
@@ -181,28 +181,32 @@ def run_perception(
     prompt_groups = WRIST_PROMPT_GROUPS if view == "wrist" else PROMPT_GROUPS
     prompts = [prompt for name in requested for prompt in prompt_groups[name]]
     model = YOLOE(str(model_path))
-    # Ultralytics resolves the MobileCLIP text encoder relative to the current
-    # directory. Keep that large ignored asset in the repository root.
-    with contextlib.chdir(ROOT):
-        model.set_classes(prompts)
-    result = model.predict(
-        image,
-        conf=confidence,
-        imgsz=640,
-        device=device,
-        retina_masks=True,
-        verbose=False,
-    )[0]
-
     candidates: list[dict[str, object]] = []
-    if result.boxes is not None and result.masks is not None:
+    # Run each semantic prompt group independently. In a combined vocabulary,
+    # visually unrelated prompts can compete in YOLOE's classification head and
+    # intermittently suppress either the bar or basket on identical frames.
+    for semantic in requested:
+        semantic_prompts = list(prompt_groups[semantic])
+        # Ultralytics resolves MobileCLIP relative to the current directory.
+        with contextlib.chdir(ROOT):
+            model.set_classes(semantic_prompts)
+        result = model.predict(
+            image,
+            conf=confidence,
+            imgsz=640,
+            device=device,
+            retina_masks=True,
+            verbose=False,
+        )[0]
+        if result.boxes is None or result.masks is None:
+            continue
         masks = result.masks.data.detach().cpu().numpy()
         for box, mask in zip(result.boxes, masks, strict=True):
             class_id = int(box.cls.item())
-            prompt = prompts[class_id]
+            prompt = semantic_prompts[class_id]
             geometry = mask_geometry(mask)
             candidate = {
-                "semantic_name": semantic_name(prompt),
+                "semantic_name": semantic,
                 "prompt": prompt,
                 "confidence": float(box.conf.item()),
                 "bbox_xyxy_px": [float(value) for value in box.xyxy[0].tolist()],
